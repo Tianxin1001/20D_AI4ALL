@@ -1,0 +1,31 @@
+cat > .gitignore << 'EOF'
+# Dataset: never upload
+nih_sample/
+data/
+*.csv
+*.png
+*.jpg
+*.zip
+
+# Mac system files
+.DS_Store
+
+# Python cache / virtual env
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Kaggle credentials
+kaggle.json
+
+# Model weights
+*.pt
+*.pth
+*.h5
+*.ckpt
+EOF
