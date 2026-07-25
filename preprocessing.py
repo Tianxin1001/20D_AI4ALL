@@ -26,7 +26,7 @@ NIH_CLASSES = [
 ]
 
 # ==========================================
-# 1. Robust Data Mocking (For Testing)
+# 1. Robust Data Mocking (For Testing Purposes Only)
 # ==========================================
 def generate_mock_data(output_dir="mock_data", num_samples=150):
     """
@@ -249,7 +249,28 @@ def get_dataloaders(csv_path, image_dir, batch_size=16, img_size=224, use_oversa
     
     if 'Split' not in df.columns:
         raise ValueError("CSV metadata must contain a 'Split' column.")
+
+    # Validate patient-level isolation if Patient ID column exists
+    if 'Patient ID' in df.columns:
+        train_pts = set(df[df['Split'] == 'train']['Patient ID'].dropna())
+        val_pts = set(df[df['Split'] == 'val']['Patient ID'].dropna())
+        test_pts = set(df[df['Split'] == 'test']['Patient ID'].dropna())
         
+        train_val_overlap = train_pts.intersection(val_pts)
+        train_test_overlap = train_pts.intersection(test_pts)
+        val_test_overlap = val_pts.intersection(test_pts)
+        
+        if train_val_overlap or train_test_overlap or val_test_overlap:
+            print(f"[WARNING] Patient data leakage detected across splits!")
+            if train_val_overlap:
+                print(f"  - {len(train_val_overlap)} patients overlap between train and val splits.")
+            if train_test_overlap:
+                print(f"  - {len(train_test_overlap)} patients overlap between train and test splits.")
+            if val_test_overlap:
+                print(f"  - {len(val_test_overlap)} patients overlap between val and test splits.")
+        else:
+            print("[INFO] Verified patient-level isolation: No patient overlap across splits.")
+
     train_df = df[df['Split'] == 'train'].copy()
     val_df = df[df['Split'] == 'val'].copy()
     test_df = df[df['Split'] == 'test'].copy()
