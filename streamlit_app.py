@@ -91,7 +91,7 @@ with st.sidebar:
         "Decision threshold", 0.05, 0.95, 0.50, 0.05,
         help="A finding is flagged as 'present' when its probability exceeds this value.",
     )
-    st.caption("Team: @Tianxin1001 · @yzhao2433 · [teammate 3]")
+    st.caption("Team: Tianxin Dong · Junaid Pathan · Krisha Rathod · Junaid Pathan · Belema Roberts")
 
 
 # --------------------------------------------------------------------------
