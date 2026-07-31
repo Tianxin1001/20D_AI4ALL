@@ -1,13 +1,15 @@
 """
 Training script for the NIH Chest X-ray multi-label classifier.
 
-Architecture: DenseNet-121 pretrained on ImageNet, fine-tuned end-to-end
-with a replaced classifier head — this is the CheXNet architecture
-(Rajpurkar et al., 2017, "CheXNet: Radiologist-Level Pneumonia Detection
-on Chest X-Rays with Deep Learning", https://arxiv.org/abs/1711.05225).
+Supports two architectures via --model:
+  - chexnet: DenseNet-121 pretrained on ImageNet, fine-tuned end-to-end
+    (Rajpurkar et al., 2017, "CheXNet: Radiologist-Level Pneumonia Detection
+    on Chest X-Rays with Deep Learning", https://arxiv.org/abs/1711.05225).
+  - simple_cnn: small from-scratch conv net, lighter to train locally.
 
-Consumes preprocessing.py's get_dataloaders() (patient-level splits +
-class weighting/oversampling) and NIH_CLASSES.
+Both share the same preprocessing.py get_dataloaders() pipeline (patient-level
+splits + class weighting/oversampling) and NIH_CLASSES, so runs are directly
+comparable.
 """
 import argparse
 import csv
@@ -18,26 +20,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.metrics import roc_auc_score
-from torchvision import models
 
+from models import build_model
 from preprocessing import NIH_CLASSES, get_dataloaders, set_seed
-
-
-class CheXNet(nn.Module):
-    """DenseNet-121 backbone with a linear classifier head for multi-label output."""
-
-    def __init__(self, num_classes=len(NIH_CLASSES), dropout=0.2, pretrained=True):
-        super().__init__()
-        weights = models.DenseNet121_Weights.IMAGENET1K_V1 if pretrained else None
-        self.backbone = models.densenet121(weights=weights)
-        in_features = self.backbone.classifier.in_features
-        self.backbone.classifier = nn.Sequential(
-            nn.Dropout(p=dropout),
-            nn.Linear(in_features, num_classes),
-        )
-
-    def forward(self, x):
-        return self.backbone(x)
 
 
 def compute_per_class_auc(y_true, y_pred):
@@ -117,6 +102,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train CheXNet (DenseNet-121) on NIH Chest X-ray")
     parser.add_argument("--csv_path", required=True, help="Path to data_split.csv from the EDA notebook")
     parser.add_argument("--image_dir", required=True, help="Directory containing the chest X-ray images")
+    parser.add_argument("--model", choices=["chexnet", "simple_cnn"], default="simple_cnn",
+                         help="Architecture to train (default: simple_cnn — lighter for local training)")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-4, help="Low LR for fine-tuning a pretrained backbone")
@@ -132,7 +119,12 @@ def main():
     args = parser.parse_args()
 
     set_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     print(f"Using device: {device}")
 
     train_loader, val_loader, test_loader, class_weights = get_dataloaders(
@@ -145,7 +137,7 @@ def main():
         num_workers=args.num_workers,
     )
 
-    model = CheXNet(dropout=args.dropout, pretrained=True).to(device)
+    model = build_model(args.model, dropout=args.dropout, pretrained=True).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=class_weights.to(device))
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
