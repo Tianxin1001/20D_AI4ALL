@@ -1,4 +1,3 @@
-cat > .gitignore << 'EOF'
 # Dataset: never upload
 nih_sample/
 data/
@@ -6,6 +5,9 @@ data/
 *.png
 *.jpg
 *.zip
+
+# Results CSVs are small summaries, not dataset files — keep these tracked
+!reports/*.csv
 
 # Mac system files
 .DS_Store
@@ -28,4 +30,3 @@ kaggle.json
 *.pth
 *.h5
 *.ckpt
-EOF
