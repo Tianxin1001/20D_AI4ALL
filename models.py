@@ -33,23 +33,37 @@ class CheXNet(nn.Module):
         return self.backbone(x)
 
 
-class SimpleCNN(nn.Module):
-    """Small from-scratch CNN: 4 conv blocks (32->64->128->256 channels),
-    global average pool, dropout, linear head. Trained from random init —
-    no pretrained weights to download or fine-tune."""
+SIMPLE_CNN_CHANNELS = [32, 64, 128, 256]
 
-    def __init__(self, num_classes=len(NIH_CLASSES), dropout=0.3):
+
+class SimpleCNN(nn.Module):
+    """Small from-scratch CNN: N conv blocks (32->64->128->256 channels),
+    global average pool, dropout, linear head. Trained from random init —
+    no pretrained weights to download or fine-tune.
+
+    num_blocks controls depth (default 4 = the original architecture). Each
+    block halves the spatial dimensions, so depth also sets total downsampling:
+    4 blocks = 16x (224px input -> 14x14 final feature map), 3 = 8x (28x28),
+    2 = 4x (56x56). Fewer blocks preserve finer spatial detail but reduce both
+    channel capacity and receptive field."""
+
+    def __init__(self, num_classes=len(NIH_CLASSES), dropout=0.3, num_blocks=4):
         super().__init__()
-        self.features = nn.Sequential(
-            self._conv_block(3, 32),
-            self._conv_block(32, 64),
-            self._conv_block(64, 128),
-            self._conv_block(128, 256),
-        )
+        if not 1 <= num_blocks <= len(SIMPLE_CNN_CHANNELS):
+            raise ValueError(
+                f"num_blocks must be between 1 and {len(SIMPLE_CNN_CHANNELS)}, got {num_blocks}"
+            )
+        channels = SIMPLE_CNN_CHANNELS[:num_blocks]
+        blocks, in_channels = [], 3
+        for out_channels in channels:
+            blocks.append(self._conv_block(in_channels, out_channels))
+            in_channels = out_channels
+        self.num_blocks = num_blocks
+        self.features = nn.Sequential(*blocks)
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.classifier = nn.Sequential(
             nn.Dropout(p=dropout),
-            nn.Linear(256, num_classes),
+            nn.Linear(in_channels, num_classes),
         )
 
     @staticmethod
@@ -68,9 +82,10 @@ class SimpleCNN(nn.Module):
         return self.classifier(x)
 
 
-def build_model(name, num_classes=len(NIH_CLASSES), dropout=0.2, pretrained=True):
+def build_model(name, num_classes=len(NIH_CLASSES), dropout=0.2, pretrained=True,
+                num_blocks=4):
     if name == "chexnet":
         return CheXNet(num_classes=num_classes, dropout=dropout, pretrained=pretrained)
     if name == "simple_cnn":
-        return SimpleCNN(num_classes=num_classes, dropout=dropout)
+        return SimpleCNN(num_classes=num_classes, dropout=dropout, num_blocks=num_blocks)
     raise ValueError(f"Unknown model: {name!r} (expected 'chexnet' or 'simple_cnn')")
