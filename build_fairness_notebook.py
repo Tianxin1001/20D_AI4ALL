@@ -25,8 +25,8 @@ md("""
 
 **AI4ALL Ignite 2026 · Chest X-ray Abnormality Detection: Making It Fair for Everyone**
 
-Run under audit: `simple_cnn_full` — SimpleCNN trained on all 112,120 images, test mean
-AUC 0.7225. See `reports/full_dataset_run_report.md`.
+Run under audit: `simple_cnn_v2_full` — SimpleCNN (width 2.0, avg+max pooling) trained on all
+112,120 images, test mean AUC 0.7647. See `reports/full_dataset_run_report.md`.
 
 The model reported here was fixed in advance by a criterion independent of the fairness
 results — highest test mean AUC — so that the audit could not be run on several models and the
@@ -60,8 +60,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 
-# Point this at the full-training-run predictions once available.
-PREDICTIONS = 'predictions/simple_cnn_full_test_predictions.csv'
+PREDICTIONS = 'predictions/simple_cnn_v2_full_test_predictions.csv'
+# Thresholds are chosen on validation predictions and only then applied to test, so the
+# operating point is never fitted to the data it is reported on.
+VAL_PREDICTIONS = 'predictions/simple_cnn_v2_full_val_predictions.csv'
 
 AGE_BINS   = [0, 30, 50, 65, 200]
 AGE_LABELS = ['<30', '30-49', '50-64', '65+']
@@ -129,17 +131,21 @@ Two choices matter, and both are stated explicitly because they shape every numb
 recall to zero on the rare classes, since the model rarely assigns them high probability. Each
 finding gets its own threshold.
 
-**Set on the pooled test set to hit a common operating point, then held fixed across
-subgroups.** Ideally the threshold would be picked on validation data, but `train.py` only
-persists test predictions. Calibrating on pooled test data is a limitation to declare — however,
-it does not bias the *disparity* measurement, which is what this audit is about: every subgroup
-is judged at the identical threshold. The question is not "how good is the model" but "at one
-operating point, is performance equal across groups?"
+**Fitted on the validation split, then applied unchanged to test.** The threshold is chosen so
+that pooled *validation* recall is 80%, and that same number is then used on the test set. This
+matters: calibrating the operating point on the data you then report would make the reported
+recall optimistic. The subgroup comparison would survive either way — all groups share one
+threshold — but the absolute level would not be trustworthy.
+
+Pooled test recall therefore lands near 80% rather than exactly on it, and the gap between the
+two is itself informative about how well the operating point generalises.
 """)
 
 code("""
+val = pd.read_csv(VAL_PREDICTIONS)
+
 def threshold_for_recall(y_true, y_prob, target):
-    \"\"\"Lowest threshold achieving at least `target` pooled recall.\"\"\"
+    \"\"\"Lowest threshold achieving at least `target` recall on the data given.\"\"\"
     pos = y_prob[y_true == 1]
     if len(pos) == 0:
         return np.nan
@@ -148,8 +154,10 @@ def threshold_for_recall(y_true, y_prob, target):
 
 thresholds, thr_rows = {}, []
 for c in CLASSES:
+    # fit on validation ...
+    t = threshold_for_recall(val[f'true_{c}'].values, val[f'prob_{c}'].values, TARGET_RECALL)
+    # ... apply to test
     y, p = df[f'true_{c}'].values, df[f'prob_{c}'].values
-    t = threshold_for_recall(y, p, TARGET_RECALL)
     thresholds[c] = t
     pred = (p >= t).astype(int)
     thr_rows.append({
@@ -410,48 +418,73 @@ md("""
 ---
 ## Findings
 
-**8 of 9 analysable findings show a recall gap whose Wilson intervals do not overlap.** Only
-Mass does not. Restricting to the five Tier-1 findings where the operating point is meaningful:
+**4 of the 7 Tier-1 findings show a recall gap whose Wilson intervals do not overlap.**
 
-| Finding | Worst group | Best group | Gap |
+| Finding | Worst group | Best group | Gap | Distinguishable |
+|---|---|---|---|---|
+| Pneumothorax | M 30-49 — 0.635 (n=104) | F 30-49 — 0.892 (n=176) | **0.257** | yes |
+| Atelectasis | M <30 — 0.616 (n=138) | F 65+ — 0.855 (n=173) | **0.240** | yes |
+| Cardiomegaly | M 65+ — 0.714 (n=35) | M <30 — 0.938 (n=32) | 0.223 | no |
+| Mass | F 30-49 — 0.675 (n=114) | M 30-49 — 0.889 (n=126) | **0.213** | yes |
+| Effusion | F <30 — 0.681 (n=91) | F 65+ — 0.866 (n=194) | **0.185** | yes |
+| Pleural_Thickening | M 50-64 — 0.678 (n=152) | F 65+ — 0.821 (n=39) | 0.143 | no |
+| Consolidation | F 50-64 — 0.763 (n=76) | M 50-64 — 0.892 (n=213) | 0.129 | no |
+
+A 0.257 gap on Pneumothorax means that among patients who genuinely have a collapsed lung, the
+model flags 89% of women aged 30-49 and 64% of men in the same band. Pneumothorax is an acute,
+time-critical finding, which makes it the most consequential gap in the table.
+
+**Sex has no single direction.** Men are recalled worse on Cardiomegaly (F 0.887 / M 0.777) and
+Pneumothorax (F 0.861 / M 0.756); women are recalled worse on Mass (M 0.795 / F 0.727) and
+Nodule (M 0.760 / F 0.693). No blanket statement about either sex is supported.
+
+**Neither does age.** Atelectasis rises with age (0.649 → 0.839), Cardiomegaly falls
+(0.932 → 0.817), Mass and Nodule are worst in the middle bands. The effect is finding-specific.
+
+**Mass fails where the disease is most common.** Correlation between subgroup recall and
+subgroup prevalence is **−0.83** for Mass, and negative for Cardiomegaly (−0.47) and
+Pleural_Thickening (−0.22). Positive elsewhere — Pneumothorax +0.91, Atelectasis +0.73,
+Effusion +0.72. Where the correlation is positive, training-data scarcity explains the gap.
+Where it is negative, it cannot, and Mass is now the clearest such case.
+
+**Patient-level aggregation changes Infiltration sharply.** Recall for F 65+ falls from 0.798
+per image to 0.575 per patient — a 0.223 drop — and M 65+ from 0.784 to 0.657. Older patients
+contribute many images each, so image-level averaging is weighted towards them; the per-image
+number flatters performance on exactly the group with the most repeat imaging. Reporting only
+per-image recall would understate the problem for that group.
+
+### What changed when the model improved
+
+The audit was run first on `simple_cnn_full` (test mean AUC 0.7225) and then on
+`simple_cnn_v2_full` (0.7647). Comparing the two is effectively an intervention study: extra
+capacity and `avgmax` pooling, measured against the fairness metric rather than against AUC.
+
+| Finding | Gap v1 | Gap v2 | Effect |
 |---|---|---|---|
-| Cardiomegaly | M 65+ — 0.600 (n=35) | M <30 — 0.938 (n=32) | **0.338** |
-| Atelectasis | M <30 — 0.616 (n=138) | F 65+ — 0.890 (n=173) | **0.274** |
-| Pneumothorax | M 30-49 — 0.606 (n=104) | F 65+ — 0.871 (n=93) | **0.265** |
-| Effusion | F <30 — 0.714 (n=91) | F 65+ — 0.876 (n=194) | 0.162 |
-| Consolidation | F 50-64 — 0.711 (n=76) | M 50-64 — 0.869 (n=213) | 0.158 |
+| Cardiomegaly | 0.338 (distinguishable) | 0.223 (not) | **closed** |
+| Consolidation | 0.158 (distinguishable) | 0.129 (not) | **closed** |
+| Atelectasis | 0.274 | 0.240 | persists |
+| Pneumothorax | 0.265 | 0.257 | persists |
+| Effusion | 0.162 | 0.185 | persists |
+| Mass | 0.125 (not) | 0.213 (distinguishable) | **emerged** |
 
-**By sex, men are recalled worse on most findings** — the reverse of the usual expectation.
-Pooled over age: Cardiomegaly F 0.854 / M 0.729, Pleural_Thickening F 0.873 / M 0.748,
-Pneumothorax F 0.839 / M 0.754. The worst-performing cell is male in six of the nine findings.
+Two gaps closed, three persisted, one emerged. The Cardiomegaly result says its gap was a
+symptom of model weakness — the group differences went away once the model got better at the
+task. The three that persisted did not, which makes them the candidates for targeted mitigation
+rather than more capacity.
 
-**By age there is no single direction, and that is the interesting part.** Atelectasis rises
-monotonically with age (0.680 → 0.868) while Cardiomegaly falls monotonically (0.915 → 0.704).
-A uniform "older patients are underserved" story does not hold.
-
-**Two findings fail where the disease is most common.** Correlation between subgroup recall and
-subgroup prevalence is −0.78 for Cardiomegaly and −0.64 for Pleural_Thickening: recall is
-*worse* in the age bands where the finding occurs *more often*. Training-data scarcity cannot
-explain that, which makes these the two cases warranting further investigation. The opposite
-pattern — recall tracking prevalence, consistent with scarcity — holds for Effusion (+1.00),
-Atelectasis (+0.93) and Consolidation (+0.84).
-
-**Patient-level aggregation materially changes Infiltration.** Recall for F 65+ falls from
-0.811 per image to 0.630 per patient, and M 65+ from 0.713 to 0.562. Older patients contribute
-many images each, and image-level averaging is weighted towards them; the per-image number
-flatters performance on exactly the group with the most repeat imaging. Gaps elsewhere survive
-the switch.
+Mass is the interesting case. Its gap only *appeared* in the better model, because in v1 the
+Mass operating point required flagging 68% of images and the comparison was meaningless. Fixing
+performance can reveal a disparity that a weak model was hiding — a reason not to treat "no
+measurable gap" from a poor model as reassurance.
 
 ## Limitations
 
-- **Several findings reach 80% recall largely by flagging liberally.** Nodule flags 71% of all
-  images, Mass 68%, Infiltration 68%. Their gaps are reported but carry no weight, and precision
-  is low across the board (Cardiomegaly 0.037, Pleural_Thickening 0.040) — this model is not
-  clinically usable, and the audit measures relative disparity, not fitness for deployment.
-- **Thresholds are calibrated on pooled test data**, because the run being audited predates
-  validation-prediction saving. This does not bias the subgroup comparison — all groups share one
-  threshold — but it does mean the absolute operating point is optimistic. `train.py` now writes
-  `*_val_predictions.csv`, so the next run removes this caveat.
+- **Precision is low throughout** (Pleural_Thickening 0.046, Cardiomegaly 0.067). This model is
+  not clinically usable; the audit measures relative disparity between groups, not fitness for
+  deployment.
+- **Nodule and Infiltration remain Tier 2** — 60% and 67% of all images flagged respectively.
+  Their gaps are reported but carry no weight.
 - **Labels are NLP-mined** from radiology reports with an estimated ~10% error rate, and label
   noise is not necessarily uniform across subgroups. A recall gap could partly reflect a labelling
   gap.
