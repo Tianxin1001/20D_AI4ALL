@@ -10,7 +10,9 @@ CheXNet's ~7M) intended as a lighter-weight baseline that trains at smaller
 image sizes on modest local hardware, using the same multi-label task,
 losses, and data pipeline as CheXNet.
 """
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision import models
 
 from preprocessing import NIH_CLASSES
@@ -47,23 +49,34 @@ class SimpleCNN(nn.Module):
     2 = 4x (56x56). Fewer blocks preserve finer spatial detail but reduce both
     channel capacity and receptive field."""
 
-    def __init__(self, num_classes=len(NIH_CLASSES), dropout=0.3, num_blocks=4):
+    def __init__(self, num_classes=len(NIH_CLASSES), dropout=0.3, num_blocks=4,
+                 width=1.0, pooling='avg'):
         super().__init__()
         if not 1 <= num_blocks <= len(SIMPLE_CNN_CHANNELS):
             raise ValueError(
                 f"num_blocks must be between 1 and {len(SIMPLE_CNN_CHANNELS)}, got {num_blocks}"
             )
-        channels = SIMPLE_CNN_CHANNELS[:num_blocks]
+        if pooling not in ('avg', 'avgmax'):
+            raise ValueError(f"pooling must be 'avg' or 'avgmax', got {pooling!r}")
+
+        channels = [int(c * width) for c in SIMPLE_CNN_CHANNELS[:num_blocks]]
         blocks, in_channels = [], 3
         for out_channels in channels:
             blocks.append(self._conv_block(in_channels, out_channels))
             in_channels = out_channels
-        self.num_blocks = num_blocks
+
+        self.num_blocks, self.width, self.pooling = num_blocks, width, pooling
         self.features = nn.Sequential(*blocks)
-        self.pool = nn.AdaptiveAvgPool2d(1)
+        # 'avgmax' concatenates global average and global max pooling. Average pooling alone
+        # dilutes a focal finding across the whole feature map — a nodule occupies roughly one
+        # cell of a 14x14 map, so its signal is averaged with ~195 cells of normal lung. Max
+        # pooling keeps the strongest response anywhere in the image, which is the right
+        # summary for small localised findings. Keeping both preserves the diffuse-finding
+        # signal that average pooling captures well (Edema, Cardiomegaly).
+        head_features = in_channels * (2 if pooling == 'avgmax' else 1)
         self.classifier = nn.Sequential(
             nn.Dropout(p=dropout),
-            nn.Linear(in_channels, num_classes),
+            nn.Linear(head_features, num_classes),
         )
 
     @staticmethod
@@ -77,15 +90,18 @@ class SimpleCNN(nn.Module):
 
     def forward(self, x):
         x = self.features(x)
-        x = self.pool(x)
-        x = x.flatten(1)
-        return self.classifier(x)
+        if self.pooling == 'avgmax':
+            x = torch.cat([F.adaptive_avg_pool2d(x, 1), F.adaptive_max_pool2d(x, 1)], dim=1)
+        else:
+            x = F.adaptive_avg_pool2d(x, 1)
+        return self.classifier(x.flatten(1))
 
 
 def build_model(name, num_classes=len(NIH_CLASSES), dropout=0.2, pretrained=True,
-                num_blocks=4):
+                num_blocks=4, width=1.0, pooling='avg'):
     if name == "chexnet":
         return CheXNet(num_classes=num_classes, dropout=dropout, pretrained=pretrained)
     if name == "simple_cnn":
-        return SimpleCNN(num_classes=num_classes, dropout=dropout, num_blocks=num_blocks)
+        return SimpleCNN(num_classes=num_classes, dropout=dropout, num_blocks=num_blocks,
+                         width=width, pooling=pooling)
     raise ValueError(f"Unknown model: {name!r} (expected 'chexnet' or 'simple_cnn')")

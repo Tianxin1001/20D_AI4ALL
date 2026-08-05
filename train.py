@@ -139,6 +139,14 @@ def main():
     parser.add_argument("--num_blocks", type=int, default=4,
                         help="simple_cnn only: number of conv blocks (1-4). Each block halves "
                              "spatial dims, so this also sets total downsampling. Ignored for chexnet.")
+    parser.add_argument("--width", type=float, default=1.0,
+                        help="simple_cnn only: channel multiplier. 1.0 = 32/64/128/256 (~393K "
+                             "params); 2.0 = 64/128/256/512 (~1.5M). The full-data run was still "
+                             "underfitting at 15 epochs, so extra capacity is the indicated fix.")
+    parser.add_argument("--pooling", choices=["avg", "avgmax"], default="avg",
+                        help="simple_cnn only: 'avgmax' concatenates global max pooling with "
+                             "global average pooling. Targets small focal findings (Mass, Nodule), "
+                             "whose signal average pooling dilutes across the feature map.")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-4, help="Low LR for fine-tuning a pretrained backbone")
@@ -180,10 +188,12 @@ def main():
     )
 
     model = build_model(args.model, dropout=args.dropout, pretrained=True,
-                        num_blocks=args.num_blocks).to(device)
+                        num_blocks=args.num_blocks, width=args.width,
+                        pooling=args.pooling).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {args.model}"
-          + (f" ({args.num_blocks} blocks)" if args.model == "simple_cnn" else "")
+          + (f" ({args.num_blocks} blocks, width {args.width}x, {args.pooling} pooling)"
+             if args.model == "simple_cnn" else "")
           + f" — {n_params:,} parameters")
     criterion = nn.BCEWithLogitsLoss(pos_weight=class_weights.to(device))
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -244,6 +254,14 @@ def main():
     logger.log_test(test_loss, test_mean_auc, test_per_class_auc)
     save_test_predictions(test_loader.dataset, y_true, y_pred, row_idx,
                           os.path.join(args.predictions_dir, f"{run}_test_predictions.csv"))
+
+    # Validation predictions too, so the fairness audit can pick decision thresholds on
+    # validation data rather than calibrating on the test set it then reports.
+    val_loader.dataset.return_meta = True
+    _, _, _, v_true, v_pred, v_idx = evaluate(
+        model, val_loader, device, criterion, return_predictions=True)
+    save_test_predictions(val_loader.dataset, v_true, v_pred, v_idx,
+                          os.path.join(args.predictions_dir, f"{run}_val_predictions.csv"))
 
 
 if __name__ == "__main__":
