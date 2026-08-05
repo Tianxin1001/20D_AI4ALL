@@ -35,3 +35,7 @@ kaggle.json
 
 # Per-image prediction dumps (large; share via Drive)
 predictions/
+
+# Personal presentation prep — not shared
+reports/final_presentation_outline.md
+reports/speaker_script_slides_5_8.md

@@ -14,16 +14,24 @@ mounts read-only into the notebook — nothing to download or upload — and pro
 
 ## 2. Confirm the mounted paths
 
-Paths occasionally differ between dataset versions, so check before relying on them.
+Delete Kaggle's default starter cell first — it walks `/kaggle/input` and prints all 112,120
+filenames. Then confirm the mount point; it is deeper than the dataset slug suggests.
 
 ```python
-!ls /kaggle/input/data/ | head
-!ls /kaggle/input/data/images_001/images | head -3
-!wc -l /kaggle/input/data/Data_Entry_2017.csv
+DATA = '/kaggle/input/datasets/organizations/nih-chest-xrays/data'
+
+!ls {DATA} | head -20
+!wc -l {DATA}/Data_Entry_2017.csv
+!ls {DATA}/images_001/images | head -3
 ```
 
-Expect `Data_Entry_2017.csv` plus `images_001/` … `images_012/`, and 112,121 lines
-(112,120 rows + header). If the folder is named differently, adjust `DATA` below.
+Expect `Data_Entry_2017.csv` plus `images_001/` … `images_012/` (each containing an inner
+`images/` folder), and 112,121 lines (112,120 rows + header). If the path differs, adjust
+`DATA` — every later cell interpolates it.
+
+Note that `--image_dir` is given this **root** directory, not one of the `images_00X` folders.
+`build_path_index()` walks all twelve recursively; that is exactly the layout it was added to
+handle. Non-image files in the root (`BBox_List_2017.csv`, the PDFs) are skipped by extension.
 
 ## 3. Set up the code
 
@@ -38,7 +46,7 @@ Expect `Data_Entry_2017.csv` plus `images_001/` … `images_012/`, and 112,121 l
 `--seed 42` matches every run done so far, so results stay comparable.
 
 ```python
-DATA = '/kaggle/input/data'
+DATA = '/kaggle/input/datasets/organizations/nih-chest-xrays/data'
 !python make_data_split.py \
     --csv_path {DATA}/Data_Entry_2017.csv \
     --output /kaggle/working/data_split_full.csv \
@@ -67,7 +75,7 @@ dataset.
 
 Two lines to check:
 
-- `Indexed 112,120 images across 12 directories under /kaggle/input/data` — the path fix working
+- `Indexed 112,120 images across 12 directories under /kaggle/input/datasets/organizations/nih-chest-xrays/data` — the path fix working
 - `Using device: cuda`
 
 Note the reported epoch time before continuing.
