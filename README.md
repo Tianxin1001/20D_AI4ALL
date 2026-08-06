@@ -109,6 +109,12 @@ a limitation throughout rather than ignored.
 | `streamlit_app.py` | Demo app |
 | `KAGGLE_SETUP.md` | Reproducing the full-dataset run |
 
+```bash
+pip install -r requirements.txt        # run the app
+pip install -r requirements-dev.txt    # train, evaluate, regenerate figures
+streamlit run streamlit_app.py
+```
+
 Reports, in reading order:
 
 1. `reports/data_quality_report.md` — what the data actually looks like
