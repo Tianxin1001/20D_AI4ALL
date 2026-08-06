@@ -1,0 +1,13 @@
+# Everything needed to train, evaluate, and regenerate figures.
+#
+# requirements.txt is deliberately kept minimal — Streamlit Community Cloud installs
+# it on every deploy, and pulling in the training stack there wastes the build budget
+# for packages the app never imports.
+#
+#     pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+scikit-learn      # roc_auc_score in train.py, train_test_split in make_data_split.py
+matplotlib        # make_eda_figures.py, fairness_eval.ipynb
+jupyter           # fairness_eval.ipynb

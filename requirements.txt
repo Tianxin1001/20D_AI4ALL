@@ -1,4 +1,10 @@
+# CPU-only torch wheels. The default build pulls ~800MB of CUDA libraries, which
+# does not fit in Streamlit Community Cloud's resource limits.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 streamlit
+torch
+torchvision
 pandas
 numpy
 pillow

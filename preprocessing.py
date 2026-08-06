@@ -129,6 +129,27 @@ def generate_mock_data(output_dir="mock_data", num_samples=150):
 # ==========================================
 # 2. Custom Dataset Class
 # ==========================================
+def build_path_index(image_dir):
+    """Maps every image filename under image_dir to its full path, recursively.
+
+    The Kaggle sample dataset stores images in one flat folder, but the full NIH
+    release nests them across images_001/images/ ... images_012/images/. Walking
+    once up front costs a few seconds and makes both layouts work identically,
+    instead of failing with FileNotFoundError on the full dataset.
+    """
+    image_dir = pathlib.Path(image_dir)
+    index = {}
+    for path in image_dir.rglob('*'):
+        if path.suffix.lower() in {'.png', '.jpg', '.jpeg'} and path.name not in index:
+            index[path.name] = path
+    if not index:
+        raise FileNotFoundError(f"No image files found anywhere under {image_dir}")
+    n_dirs = len({p.parent for p in index.values()})
+    print(f"Indexed {len(index):,} images across {n_dirs} director"
+          f"{'y' if n_dirs == 1 else 'ies'} under {image_dir}")
+    return index
+
+
 class NIHChestXrayDataset(Dataset):
     """
     PyTorch Dataset for the NIH Chest X-ray dataset.
@@ -139,7 +160,8 @@ class NIHChestXrayDataset(Dataset):
     estimated ~10% error rate. Label smoothing reduces overconfidence on noisy labels.
     Recommended value: 0.1 (i.e. positive targets become 0.9 instead of 1.0).
     """
-    def __init__(self, dataframe, image_dir, classes=None, transform=None, label_smoothing=0.0):
+    def __init__(self, dataframe, image_dir, classes=None, transform=None, label_smoothing=0.0,
+                 return_meta=False, path_index=None):
         self.df = dataframe.reset_index(drop=True)
         self.image_dir = pathlib.Path(image_dir)
         self.classes = classes if classes is not None else NIH_CLASSES
@@ -147,6 +169,16 @@ class NIHChestXrayDataset(Dataset):
         self.transform = transform
         # label_smoothing=0.1 recommended based on EDA estimated ~10% NLP error rate
         self.label_smoothing = label_smoothing
+        # return_meta=True makes __getitem__ also return the row index, so predictions
+        # can be joined back to Patient ID / sex / age for subgroup (fairness) analysis.
+        self.return_meta = return_meta
+        # Resolved filename -> full path map. The sample dataset is a flat directory,
+        # but the full dataset nests images across images_001/images/ ... images_012/images/,
+        # so a plain image_dir / filename join fails there. Built once, shared across splits.
+        self.path_index = path_index if path_index is not None else build_path_index(self.image_dir)
+
+        # Unsmoothed positive counts, needed for pos_weight — see compute_class_weights().
+        self.raw_positive_counts = np.zeros(len(self.classes), dtype=np.float64)
 
         self.labels = []
         for _, row in self.df.iterrows():
@@ -159,6 +191,7 @@ class NIHChestXrayDataset(Dataset):
                         # Apply label smoothing: positive target = 1.0 - smoothing
                         # This prevents the model from being overconfident on noisy NLP labels
                         label_vec[self.class_to_idx[finding]] = 1.0 - self.label_smoothing
+                        self.raw_positive_counts[self.class_to_idx[finding]] += 1
             self.labels.append(label_vec)
         self.labels = np.array(self.labels, dtype=np.float32)
 
@@ -167,10 +200,14 @@ class NIHChestXrayDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        image_path = self.image_dir / row['Image Index']
+        filename = row['Image Index']
+        image_path = self.path_index.get(filename)
 
-        if not image_path.exists():
-            raise FileNotFoundError(f"Image file not found: {image_path}")
+        if image_path is None:
+            raise FileNotFoundError(
+                f"Image {filename!r} not found anywhere under {self.image_dir}. "
+                f"Indexed {len(self.path_index):,} images."
+            )
 
         image = Image.open(image_path).convert('RGB')
         label_tensor = torch.tensor(self.labels[idx], dtype=torch.float32)
@@ -178,6 +215,8 @@ class NIHChestXrayDataset(Dataset):
         if self.transform:
             image = self.transform(image)
 
+        if self.return_meta:
+            return image, label_tensor, idx
         return image, label_tensor
 
 
@@ -220,20 +259,42 @@ def get_transforms(img_size=224):
 # ==========================================
 # 4. Class Weighting & Oversampling
 # ==========================================
-def compute_class_weights(dataset):
+def compute_class_weights(dataset, max_weight=20.0):
     """
     Computes pos_weight per class for BCEWithLogitsLoss to handle class imbalance.
     pos_weight = (total_negatives + eps) / (total_positives + eps)
 
     EDA context: label counts range from Infiltration (19,894) to Hernia (227).
     This ratio-based weighting ensures rare classes like Hernia receive higher loss weight.
+
+    Fix 1 — count positives BEFORE label smoothing. Summing dataset.labels counts
+    smoothed targets (0.9, not 1.0), which under-counts positives by the smoothing
+    factor and inflates every pos_weight by ~11% at smoothing=0.1. raw_positive_counts
+    is accumulated from the unsmoothed labels instead.
+
+    Fix 2 — cap the weight. Hernia is 227 / 112,120 images, giving an uncapped
+    pos_weight near 493. Multiplying one sample's loss by ~500 produces very large,
+    high-variance gradients and destabilises training. Capping at 20 keeps rare
+    classes strongly upweighted without letting a handful of images dominate the
+    update. Oversampling (get_multilabel_sampler) already provides a second,
+    gentler mechanism for the same problem.
     """
-    labels = dataset.labels
-    total_samples = len(labels)
-    pos_counts = labels.sum(axis=0)
+    total_samples = len(dataset.labels)
+    pos_counts = getattr(dataset, 'raw_positive_counts', None)
+    if pos_counts is None:                      # fallback for externally built datasets
+        pos_counts = dataset.labels.sum(axis=0)
     neg_counts = total_samples - pos_counts
     eps = 1e-5
     pos_weights = (neg_counts + eps) / (pos_counts + eps)
+
+    n_capped = int((pos_weights > max_weight).sum())
+    if n_capped:
+        capped = [f"{NIH_CLASSES[i]} {pos_weights[i]:.0f}"
+                  for i in np.where(pos_weights > max_weight)[0]]
+        print(f"Capped pos_weight at {max_weight:.0f} for {n_capped} class"
+              f"{'' if n_capped == 1 else 'es'}: {', '.join(capped)}")
+    pos_weights = np.clip(pos_weights, None, max_weight)
+
     return torch.tensor(pos_weights, dtype=torch.float32)
 
 
@@ -272,7 +333,8 @@ def get_multilabel_sampler(dataset, baseline_weight=0.1):
 # 5. Flexible DataLoaders
 # ==========================================
 def get_dataloaders(csv_path, image_dir, batch_size=16, img_size=224,
-                    use_oversampling=True, label_smoothing=0.1, num_workers=0):
+                    use_oversampling=True, label_smoothing=0.1, num_workers=0,
+                    max_pos_weight=20.0, return_test_meta=False):
     """
     Creates Train, Val, and Test DataLoaders from a pre-split CSV.
 
@@ -358,15 +420,23 @@ def get_dataloaders(csv_path, image_dir, batch_size=16, img_size=224,
 
     train_transform, val_transform = get_transforms(img_size)
 
+    # Walk the image directory once and share the index across all three splits.
+    path_index = build_path_index(image_dir)
+
     train_dataset = NIHChestXrayDataset(
-        train_df, image_dir, transform=train_transform, label_smoothing=label_smoothing)
+        train_df, image_dir, transform=train_transform, label_smoothing=label_smoothing,
+        path_index=path_index)
     val_dataset = NIHChestXrayDataset(
-        val_df, image_dir, transform=val_transform, label_smoothing=0.0)
+        val_df, image_dir, transform=val_transform, label_smoothing=0.0,
+        path_index=path_index)
+    # return_meta lets the fairness analysis join test predictions back to
+    # Patient ID / sex / age via test_loader.dataset.df.
     test_dataset = NIHChestXrayDataset(
-        test_df, image_dir, transform=val_transform, label_smoothing=0.0)
+        test_df, image_dir, transform=val_transform, label_smoothing=0.0,
+        path_index=path_index, return_meta=return_test_meta)
 
     # Class weights computed on training data only — avoids validation leakage
-    class_weights = compute_class_weights(train_dataset)
+    class_weights = compute_class_weights(train_dataset, max_weight=max_pos_weight)
 
     train_kwargs = {
         'batch_size': batch_size,

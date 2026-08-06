@@ -6,8 +6,10 @@ data/
 *.jpg
 *.zip
 
-# Results CSVs are small summaries, not dataset files — keep these tracked
+# Results CSVs and presentation figures are small artefacts, not dataset files — keep tracked
 !reports/*.csv
+!reports/figures/
+!reports/figures/*.png
 
 # Mac system files
 .DS_Store
@@ -30,3 +32,10 @@ kaggle.json
 *.pth
 *.h5
 *.ckpt
+
+# Per-image prediction dumps (large; share via Drive)
+predictions/
+
+# Personal presentation prep — not shared
+reports/final_presentation_outline.md
+reports/speaker_script_slides_5_8.md
